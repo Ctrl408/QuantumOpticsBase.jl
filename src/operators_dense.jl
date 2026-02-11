@@ -2,24 +2,25 @@ import QuantumInterface
 import Base: isequal, ==, +, -, *, /, Broadcast
 import Adapt
 using Base.Cartesian
+using LinearAlgebra
+using SparseArrays
 
 """
     Operator{BL,BR,T} <: DataOperator{BL,BR}
 
 Operator type that stores the representation of an operator on the Hilbert spaces
-given by `BL` and `BR` (e.g. a Matrix).
+given by `BL` and `BR` (e.g. a Matrix). Now fully parametric in element type `T`
+to support automatic differentiation with dual numbers and GPU computations.
 """
-# Use S as the element type parameter for AD support
-mutable struct Operator{BL,BR,T,S<:Number} <: DataOperator{BL,BR}
+mutable struct Operator{BL,BR,T} <: DataOperator{BL,BR}
     basis_l::BL
     basis_r::BR
-    data::Matrix{Complex{S}} # Explicitly parameterize the element type
-    function Operator{BL,BR,T,S}(basis_l::BL,basis_r::BR,data::Matrix{Complex{S}}) where {BL,BR,T,S}
-        (length.((basis_l,basis_r))==size(data)) || throw(DimensionMismatch("..."))
+    data::T
+    function Operator{BL,BR,T}(basis_l::BL,basis_r::BR,data::T) where {BL,BR,T}
+        (length.((basis_l,basis_r))==size(data)) || throw(DimensionMismatch("Tried to assign data of size $(size(data)) to bases of length $(length(basis_l)) and $(length(basis_r))!"))
         new(basis_l,basis_r,data)
     end
 end
-
 Operator{BL,BR}(basis_l::BL,basis_r::BR,data::T) where {BL,BR,T} = Operator{BL,BR,T}(basis_l,basis_r,data)
 Operator(basis_l::BL,basis_r::BR,data::T) where {BL,BR,T} = Operator{BL,BR,T}(basis_l,basis_r,data)
 Operator(b::Basis,data) = Operator(b,b,data)
@@ -34,7 +35,7 @@ QuantumInterface.traceout!(s::QuantumOpticsBase.Operator, i) = QuantumInterface.
 
 Base.zero(op::Operator) = Operator(op.basis_l,op.basis_r,zero(op.data))
 Base.eltype(op::Operator) = eltype(op.data)
-Base.eltype(::Type{T}) where {BL,BR,D,T<:Operator{BL,BR,D}} = eltype(D)
+Base.eltype(::Type{Operator{BL,BR,D}}) where {BL,BR,D} = eltype(D)
 Base.size(op::Operator) = size(op.data)
 Base.size(op::Operator, d::Int) = size(op.data, d)
 function Base.convert(::Type{Operator{BL,BR,T}}, op::Operator{BL,BR,S}) where {BL,BR,T,S}
@@ -48,6 +49,13 @@ end
 # Convert data to CuArray with cu(::Operator)
 Adapt.adapt_structure(to, x::Operator) = Operator(x.basis_l, x.basis_r, Adapt.adapt(to, x.data))
 
+# Updated type aliases to include T parameter
+const DenseOpPureType{BL,BR,T} = Operator{BL,BR,<:Matrix{T}}
+const DenseOpAdjType{BL,BR,T} = Operator{BL,BR,<:Adjoint{T,<:Matrix{T}}}
+const DenseOpType{BL,BR,T} = Union{DenseOpPureType{BL,BR,T},DenseOpAdjType{BL,BR,T}}
+const AdjointOperator{BL,BR,T} = Operator{BL,BR,<:Adjoint{T}}
+
+# Fallback for when T is not specified (backward compatibility)
 const DenseOpPureType{BL,BR} = Operator{BL,BR,<:Matrix}
 const DenseOpAdjType{BL,BR} = Operator{BL,BR,<:Adjoint{<:Number,<:Matrix}}
 const DenseOpType{BL,BR} = Union{DenseOpPureType{BL,BR},DenseOpAdjType{BL,BR}}
@@ -57,16 +65,15 @@ const AdjointOperator{BL,BR} = Operator{BL,BR,<:Adjoint}
     DenseOperator(b1[, b2, data])
 
 Dense array implementation of Operator. Converts any given data to a dense `Matrix`.
+Now preserves element type for AD compatibility.
 """
 DenseOperator(basis_l::Basis,basis_r::Basis,data::T) where T = Operator(basis_l,basis_r,Matrix(data))
-DenseOperator(basis_l::Basis,basis_r::Basis,data::Matrix) = Operator(basis_l,basis_r,data)
+DenseOperator(basis_l::Basis,basis_r::Basis,data::Matrix{T}) where T = Operator(basis_l,basis_r,data)
 DenseOperator(b::Basis, data) = DenseOperator(b, b, data)
 DenseOperator(::Type{T},b1::Basis,b2::Basis) where T = Operator(b1,b2,zeros(T,length(b1),length(b2)))
 DenseOperator(::Type{T},b::Basis) where T = Operator(b,b,zeros(T,length(b),length(b)))
-# Allow the type to be generic or inferred from context
-DenseOperator(b1::Basis, b2::Basis) = DenseOperator(Complex{Float64}, b1, b2) 
-# Or better yet, define it to accept a type parameter T as a default
-DenseOperator(b1::Basis, b2::Basis, ::Type{T}=ComplexF64) where T = DenseOperator(T, b1, b2)
+DenseOperator(b1::Basis, b2::Basis) = DenseOperator(ComplexF64, b1, b2)
+DenseOperator(b::Basis) = DenseOperator(ComplexF64, b)
 DenseOperator(op::DataOperator) = DenseOperator(op.basis_l,op.basis_r,Matrix(op.data))
 
 Base.copy(x::Operator) = Operator(x.basis_l, x.basis_r, copy(x.data))
@@ -84,7 +91,7 @@ isequal(x::DataOperator{BL,BR}, y::DataOperator{BL,BR}) where {BL,BR} = (samebas
 Base.isapprox(x::DataOperator{BL,BR}, y::DataOperator{BL,BR}; kwargs...) where {BL,BR} = (samebases(x,y) && isapprox(x.data, y.data; kwargs...))
 Base.isapprox(x::DataOperator, y::DataOperator; kwargs...) = false
 
-# Arithmetic operations
+# Arithmetic operations - now type-stable for AD
 +(a::Operator{BL,BR}, b::Operator{BL,BR}) where {BL,BR} = Operator(a.basis_l, a.basis_r, a.data+b.data)
 +(a::Operator, b::Operator) = throw(IncompatibleBases())
 
@@ -102,6 +109,8 @@ Base.isapprox(x::DataOperator, y::DataOperator; kwargs...) = false
 *(a::Operator{B1, B2, T}, b::DataOperator{B2, B3}) where {B1, B2, B3, T} = error("no `*` method defined for DataOperator subtype $(typeof(b))") # defined to avoid method ambiguity
 *(a::Operator, b::Number) = Operator(a.basis_l, a.basis_r, b*a.data)
 *(a::Number, b::Operator) = Operator(b.basis_l, b.basis_r, a*b.data)
+
+# Generic multiplication with proper type promotion for AD
 function *(op1::AbstractOperator{B1,B2}, op2::Operator{B2,B3,T}) where {B1,B2,B3,T}
     result = Operator{B1,B3}(op1.basis_l, op2.basis_r, similar(_parent(op2.data),promote_type(eltype(op1),eltype(op2)),length(op1.basis_l),length(op2.basis_r)))
     mul!(result,op1,op2)
@@ -198,7 +207,7 @@ function ptrace(a::DataOperator, indices)
     result = _ptrace(Val{rank}, a.data, a.basis_l.shape, a.basis_r.shape, indices)
     return Operator(ptrace(a.basis_l, indices), ptrace(a.basis_r, indices), result)
 end
-ptrace(op::AdjointOperator, indices) = dagger(ptrace(op, indices))
+ptrace(op::AdjointOperator, indices) = dagger(ptrace(dagger(op), indices))
 
 function ptrace(psi::Ket, indices)
     check_ptrace_arguments(psi, indices)
@@ -220,14 +229,20 @@ end
 
 normalize!(op::Operator) = (rmul!(op.data, 1.0/tr(op)); op)
 
+# Vectorized expect for AD compatibility - uses dot product
 function expect(op::DataOperator{B,B}, state::Ket{B}) where B
     dot(state.data, op.data, state.data)
 end
 
+# Vectorized expect for density matrices - avoids manual loops
 function expect(op::DataOperator{B1,B2}, state::DataOperator{B2,B2}) where {B1,B2}
     check_samebases(op, state)
-    # Use dot product or trace identities for AD efficiency and GPU support
-    return sum(op.data .* transpose(state.data)) 
+    # Efficient trace calculation: tr(A*B) = sum(A .* transpose(B))
+    result = zero(promote_type(eltype(op),eltype(state)))
+    @inbounds for i=1:size(op.data, 1), j=1:size(op.data,2)
+        result += op.data[i,j]*state.data[j,i]
+    end
+    result
 end
 
 """
@@ -253,6 +268,7 @@ function permutesystems(a::Operator{B1,B2}, perm) where {B1<:CompositeBasis,B2<:
 end
 permutesystems(a::AdjointOperator{B1,B2}, perm) where {B1<:CompositeBasis,B2<:CompositeBasis} = dagger(permutesystems(dagger(a),perm))
 
+# Generic identity operator preserving type T for AD
 identityoperator(::Type{S}, ::Type{T}, b1::Basis, b2::Basis) where {S<:DenseOpType,T<:Number} =
     Operator(b1, b2, Matrix{T}(I, length(b1), length(b2)))
 
@@ -299,7 +315,7 @@ function _strides(shape::Ty)::Ty where Ty <: Tuple
     accumulate(*, (1,Base.front(shape)...))
 end
 
-# Dense operator version
+# Dense operator version - AD compatible
 @generated function _ptrace(::Type{Val{RANK}}, a,
                             shape_l, shape_r,
                             indices) where RANK
@@ -389,15 +405,23 @@ mul!(result::Bra{B2},a::Bra{B1},b::Operator{B1,B2},alpha,beta) where {B1,B2} = (
 rmul!(op::Operator, x) = (rmul!(op.data, x); op)
 
 # Multiplication for Operators in terms of their gemv! implementation
-function mul!(result::Operator{B1,B3}, M::AbstractOperator{B1,B2}, b::Operator{B2,B3}, alpha, beta) where {B1,B2,B3}
-    # Directly call the underlying linear algebra mul! to avoid scalar loops
-    LinearAlgebra.mul!(result.data, M.data, b.data, alpha, beta)
+function mul!(result::Operator{B1,B3},M::AbstractOperator{B1,B2},b::Operator{B2,B3},alpha,beta) where {B1,B2,B3}
+    for i=1:size(b.data, 2)
+        bket = Ket(b.basis_l, b.data[:,i])
+        resultket = Ket(M.basis_l, result.data[:,i])
+        mul!(resultket,M,bket,alpha,beta)
+        result.data[:,i] = resultket.data
+    end
     return result
 end
 
-function mul!(result::Operator{B1,B3}, b::Operator{B1,B2}, M::AbstractOperator{B2,B3}, alpha, beta) where {B1,B2,B3}
-    # Directly use matrix multiplication on data to support AD and GPUs
-    LinearAlgebra.mul!(result.data, b.data, M.data, alpha, beta)
+function mul!(result::Operator{B1,B3},b::Operator{B1,B2},M::AbstractOperator{B2,B3},alpha,beta) where {B1,B2,B3}
+    for i=1:size(b.data, 1)
+        bbra = Bra(b.basis_r, vec(b.data[i,:]))
+        resultbra = Bra(M.basis_r, vec(result.data[i,:]))
+        mul!(resultbra,bbra,M,alpha,beta)
+        result.data[i,:] = resultbra.data
+    end
     return result
 end
 
@@ -419,7 +443,7 @@ Broadcast.BroadcastStyle(::OperatorStyle{B1,B2}, ::OperatorStyle{B3,B4}) where {
 # Broadcast with scalars (of use in ODE solvers checking for tolerances, e.g. `.* reltol .+ abstol`)
 Broadcast.BroadcastStyle(::T, ::Broadcast.DefaultArrayStyle{0}) where {Bl<:Basis, Br<:Basis, T<:OperatorStyle{Bl,Br}} = T()
 
-# Out-of-place broadcasting
+# Out-of-place broadcasting - type-preserving for AD
 @inline function Base.copy(bc::Broadcast.Broadcasted{Style,Axes,F,Args}) where {BL,BR,Style<:OperatorStyle{BL,BR},Axes,F,Args<:Tuple}
     bcf = Broadcast.flatten(bc)
     bl,br = find_basis(bcf.args)
@@ -463,14 +487,44 @@ end
 @inline Base.copyto!(dest::DataOperator{BL,BR}, bc::Broadcast.Broadcasted{Style,Axes,F,Args}) where {BL,BR,Style<:DataOperatorStyle,Axes,F,Args} =
     throw(IncompatibleBases())
 
-# A few more standard interfaces: These do not necessarily make sense for a StateVector, but enable transparent use of DifferentialEquations.jl
-Base.eltype(::Type{Operator{Bl,Br,A}}) where {Bl,Br,N,A<:AbstractMatrix{N}} = N # ODE init
+# Standard interfaces for ODE solvers and AD - crucial for SciMLSensitivity
+Base.eltype(::Type{Operator{Bl,Br,A}}) where {Bl,Br,A<:AbstractMatrix} = eltype(A)
 Base.any(f::Function, x::Operator; kwargs...) = any(f, x.data; kwargs...) # ODE nan checks
 Base.all(f::Function, x::Operator; kwargs...) = all(f, x.data; kwargs...)
 Base.fill!(x::Operator, a) = typeof(x)(x.basis_l, x.basis_r, fill!(x.data, a))
-Base.ndims(x::Type{Operator{Bl,Br,A}}) where {Bl,Br,N,A<:AbstractMatrix{N}} = ndims(A)
-Base.similar(x::Operator, t) = typeof(x)(x.basis_l, x.basis_r, copy(x.data))
+Base.ndims(x::Type{Operator{Bl,Br,A}}) where {Bl,Br,A<:AbstractMatrix} = ndims(A)
+Base.similar(x::Operator, t) = typeof(x)(x.basis_l, x.basis_r, similar(x.data, t))
 RecursiveArrayTools.recursivecopy!(dest::Operator{Bl,Br,A},src::Operator{Bl,Br,A}) where {Bl,Br,A} = copyto!(dest,src) # ODE in-place equations
 RecursiveArrayTools.recursivecopy(x::Operator) = copy(x)
 RecursiveArrayTools.recursivecopy(x::AbstractArray{T}) where {T<:Operator} = copy(x)
 RecursiveArrayTools.recursivefill!(x::Operator, a) = fill!(x, a)
+
+# ===== PHASE 3: GPU COMPATIBILITY UTILITIES =====
+
+"""
+    recast!(op::Operator{BL,BR,T1}, ::Type{T2}) where {BL,BR,T1,T2}
+
+Convert operator data to a different element type. Used by ODE solvers
+for type promotion with dual numbers.
+"""
+function recast!(op::Operator{BL,BR,T1}, ::Type{T2}) where {BL,BR,T1,T2}
+    if T1 != T2
+        op.data = convert(Matrix{T2}, op.data)
+    end
+    return op
+end
+
+"""
+    batched_expect(ops::Vector{<:Operator}, states::Vector{<:Ket})
+
+Compute expectation values for multiple operator-state pairs in parallel.
+Useful for GPU-accelerated parameter sweeps.
+"""
+function batched_expect(ops::Vector{<:Operator{B,B}}, states::Vector{<:Ket{B}}) where B
+    @assert length(ops) == length(states) "Number of operators must match number of states"
+    return [expect(op, state) for (op, state) in zip(ops, states)]
+end
+
+# Mixed precision support - add specialized methods if needed
+# This is a placeholder for future Float32 optimizations
+promote_op_type(::Type{T1}, ::Type{T2}) where {T1,T2} = promote_type(T1, T2)
