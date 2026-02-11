@@ -9,15 +9,17 @@ using Base.Cartesian
 Operator type that stores the representation of an operator on the Hilbert spaces
 given by `BL` and `BR` (e.g. a Matrix).
 """
-mutable struct Operator{BL,BR,T} <: DataOperator{BL,BR}
+# Use S as the element type parameter for AD support
+mutable struct Operator{BL,BR,T,S<:Number} <: DataOperator{BL,BR}
     basis_l::BL
     basis_r::BR
-    data::T
-    function Operator{BL,BR,T}(basis_l::BL,basis_r::BR,data::T) where {BL,BR,T}
-        (length.((basis_l,basis_r))==size(data)) || throw(DimensionMismatch("Tried to assign data of size $(size(data)) to bases of length $(length(basis_l)) and $(length(basis_r))!"))
+    data::Matrix{Complex{S}} # Explicitly parameterize the element type
+    function Operator{BL,BR,T,S}(basis_l::BL,basis_r::BR,data::Matrix{Complex{S}}) where {BL,BR,T,S}
+        (length.((basis_l,basis_r))==size(data)) || throw(DimensionMismatch("..."))
         new(basis_l,basis_r,data)
     end
 end
+
 Operator{BL,BR}(basis_l::BL,basis_r::BR,data::T) where {BL,BR,T} = Operator{BL,BR,T}(basis_l,basis_r,data)
 Operator(basis_l::BL,basis_r::BR,data::T) where {BL,BR,T} = Operator{BL,BR,T}(basis_l,basis_r,data)
 Operator(b::Basis,data) = Operator(b,b,data)
@@ -61,8 +63,10 @@ DenseOperator(basis_l::Basis,basis_r::Basis,data::Matrix) = Operator(basis_l,bas
 DenseOperator(b::Basis, data) = DenseOperator(b, b, data)
 DenseOperator(::Type{T},b1::Basis,b2::Basis) where T = Operator(b1,b2,zeros(T,length(b1),length(b2)))
 DenseOperator(::Type{T},b::Basis) where T = Operator(b,b,zeros(T,length(b),length(b)))
-DenseOperator(b1::Basis, b2::Basis) = DenseOperator(ComplexF64, b1, b2)
-DenseOperator(b::Basis) = DenseOperator(ComplexF64, b)
+# Allow the type to be generic or inferred from context
+DenseOperator(b1::Basis, b2::Basis) = DenseOperator(Complex{Float64}, b1, b2) 
+# Or better yet, define it to accept a type parameter T as a default
+DenseOperator(b1::Basis, b2::Basis, ::Type{T}=ComplexF64) where T = DenseOperator(T, b1, b2)
 DenseOperator(op::DataOperator) = DenseOperator(op.basis_l,op.basis_r,Matrix(op.data))
 
 Base.copy(x::Operator) = Operator(x.basis_l, x.basis_r, copy(x.data))
@@ -222,11 +226,8 @@ end
 
 function expect(op::DataOperator{B1,B2}, state::DataOperator{B2,B2}) where {B1,B2}
     check_samebases(op, state)
-    result = zero(promote_type(eltype(op),eltype(state)))
-    @inbounds for i=1:size(op.data, 1), j=1:size(op.data,2)
-        result += op.data[i,j]*state.data[j,i]
-    end
-    result
+    # Use dot product or trace identities for AD efficiency and GPU support
+    return sum(op.data .* transpose(state.data)) 
 end
 
 """
@@ -388,13 +389,9 @@ mul!(result::Bra{B2},a::Bra{B1},b::Operator{B1,B2},alpha,beta) where {B1,B2} = (
 rmul!(op::Operator, x) = (rmul!(op.data, x); op)
 
 # Multiplication for Operators in terms of their gemv! implementation
-function mul!(result::Operator{B1,B3},M::AbstractOperator{B1,B2},b::Operator{B2,B3},alpha,beta) where {B1,B2,B3}
-    for i=1:size(b.data, 2)
-        bket = Ket(b.basis_l, b.data[:,i])
-        resultket = Ket(M.basis_l, result.data[:,i])
-        mul!(resultket,M,bket,alpha,beta)
-        result.data[:,i] = resultket.data
-    end
+function mul!(result::Operator{B1,B3}, M::AbstractOperator{B1,B2}, b::Operator{B2,B3}, alpha, beta) where {B1,B2,B3}
+    # Directly call the underlying linear algebra mul! to avoid scalar loops
+    LinearAlgebra.mul!(result.data, M.data, b.data, alpha, beta)
     return result
 end
 
