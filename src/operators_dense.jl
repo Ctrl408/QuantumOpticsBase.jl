@@ -395,13 +395,9 @@ function mul!(result::Operator{B1,B3}, M::AbstractOperator{B1,B2}, b::Operator{B
     return result
 end
 
-function mul!(result::Operator{B1,B3},b::Operator{B1,B2},M::AbstractOperator{B2,B3},alpha,beta) where {B1,B2,B3}
-    for i=1:size(b.data, 1)
-        bbra = Bra(b.basis_r, vec(b.data[i,:]))
-        resultbra = Bra(M.basis_r, vec(result.data[i,:]))
-        mul!(resultbra,bbra,M,alpha,beta)
-        result.data[i,:] = resultbra.data
-    end
+function mul!(result::Operator{B1,B3}, b::Operator{B1,B2}, M::AbstractOperator{B2,B3}, alpha, beta) where {B1,B2,B3}
+    # Directly use matrix multiplication on data to support AD and GPUs
+    LinearAlgebra.mul!(result.data, b.data, M.data, alpha, beta)
     return result
 end
 
